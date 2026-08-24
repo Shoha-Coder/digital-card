@@ -1,0 +1,8 @@
+title = "digital-card"
+
+[allowlist]
+description = "Committed env TEMPLATES only (placeholders, never real values)."
+paths = [
+  '''(^|/)\.env\.example$''',
+  '''(^|/)\.env\.prod\.example$''',
+]

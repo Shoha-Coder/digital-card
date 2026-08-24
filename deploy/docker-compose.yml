@@ -1,0 +1,96 @@
+# Production compose — VPS edition (behind Nginx Proxy Manager).
+#
+# Files that MUST exist on the VPS (relative to this file):
+#   .env.prod            secrets/config — created ONCE by hand, NEVER synced by CI
+#   web/server/nginx.conf  side-car config (synced from repo by CI)
+#   service-tags.env     per-service image tags (managed by rollout.sh)
+#
+# DATA PRESERVATION: the compose `name:` and volume names define where
+# production data lives. NEVER rename them after go-live.
+
+name: digital-card
+
+networks:
+  proxy:
+    external: true
+  internal:
+    driver: bridge
+
+volumes:
+  pgdata:
+
+x-restart: &restart_policy
+  restart: unless-stopped
+
+x-logging: &default_logging
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "5"
+
+x-secure: &no_new_privs
+  security_opt:
+    - no-new-privileges:true
+
+x-db-env: &db_env
+  DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?schema=public
+
+services:
+  postgres:
+    <<: [*restart_policy, *default_logging, *no_new_privs]
+    image: postgres:16-alpine
+    container_name: digital-card-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    networks:
+      - internal
+
+  server:
+    <<: [*restart_policy, *default_logging, *no_new_privs]
+    image: ${IMAGE_REPO}/server:${SERVER_IMAGE_TAG}
+    container_name: digital-card-server
+    env_file:
+      - .env.prod
+    environment:
+      <<: *db_env
+      NODE_ENV: production
+      PORT: "3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+    networks:
+      - internal
+
+  server-web:
+    <<: [*restart_policy, *default_logging, *no_new_privs]
+    image: nginx:1.27-alpine
+    container_name: digital-card-server-web
+    volumes:
+      - ./web/server/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    networks: [proxy, internal]
+    depends_on:
+      server:
+        condition: service_healthy

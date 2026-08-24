@@ -1,0 +1,248 @@
+name: CI/CD
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_REPO: ghcr.io/${{ github.repository }}
+  IMAGE_TAG: ${{ github.sha }}
+  NODE_VERSION: "22"
+  GITLEAKS_VERSION: "8.21.2"
+
+jobs:
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.gate.outputs.code }}
+      server: ${{ steps.filter.outputs.server }}
+      deploy: ${{ steps.filter.outputs.deploy }}
+      ci: ${{ steps.filter.outputs.ci }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            server:
+              - 'src/**'
+              - 'prisma/**'
+              - 'package-lock.json'
+              - 'Dockerfile'
+              - 'tsconfig*.json'
+              - 'nest-cli.json'
+            deploy:
+              - 'deploy/**'
+            ci:
+              - '.github/workflows/**'
+              - '.gitleaks.toml'
+
+      - name: Skip docs-only changes
+        id: gate
+        run: |
+          if [ "${{ steps.filter.outputs.server }}" = "true" ] || \
+             [ "${{ steps.filter.outputs.deploy }}" = "true" ] || \
+             [ "${{ steps.filter.outputs.ci }}" = "true" ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "code=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  quality:
+    name: Typecheck + test
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - name: Install deps
+        run: npm ci --no-audit --no-fund
+      - name: Generate Prisma client
+        run: npx prisma generate
+      - name: Typecheck
+        run: npx tsc --noEmit
+      - name: Test
+        run: npm test --if-present
+
+  secret-scan:
+    name: Secret detection
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/cache@v4
+        id: gitleaks-cache
+        with:
+          path: ${{ runner.tool_cache }}/gitleaks
+          key: gitleaks-${{ env.GITLEAKS_VERSION }}-linux-x64
+
+      - name: Install gitleaks
+        if: steps.gitleaks-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "${{ runner.tool_cache }}/gitleaks"
+          curl -sSfL \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${{ env.GITLEAKS_VERSION }}/gitleaks_${{ env.GITLEAKS_VERSION }}_linux_x64.tar.gz" \
+            | tar -xz -C "${{ runner.tool_cache }}/gitleaks"
+
+      - name: Run Gitleaks
+        run: |
+          "${{ runner.tool_cache }}/gitleaks/gitleaks" dir . \
+            --config .gitleaks.toml --verbose --redact
+
+  build:
+    name: Build server
+    runs-on: ubuntu-latest
+    needs: changes
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' &&
+        github.ref == 'refs/heads/main' &&
+        (needs.changes.outputs.server == 'true' ||
+          needs.changes.outputs.deploy == 'true' ||
+          needs.changes.outputs.ci == 'true'))
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ${{ env.IMAGE_REPO }}/server:${{ env.IMAGE_TAG }}
+            ${{ env.IMAGE_REPO }}/server:latest
+          cache-from: |
+            type=gha,scope=server
+            type=registry,ref=${{ env.IMAGE_REPO }}/server:buildcache
+          cache-to: |
+            type=gha,scope=server,mode=max
+            type=registry,ref=${{ env.IMAGE_REPO }}/server:buildcache,mode=max
+          provenance: false
+          sbom: false
+
+  deploy:
+    name: Deploy to VPS
+    runs-on: ubuntu-latest
+    concurrency:
+      group: deploy-${{ github.ref }}
+      cancel-in-progress: false
+    needs:
+      - changes
+      - quality
+      - secret-scan
+      - build
+    if: |
+      always() &&
+      !cancelled() &&
+      !contains(needs.*.result, 'failure') &&
+      (github.event_name == 'workflow_dispatch' ||
+        (github.event_name == 'push' && github.ref == 'refs/heads/main')) &&
+      needs.build.result == 'success'
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Preflight — required secrets
+        env:
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_PATH: ${{ secrets.VPS_PATH }}
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+        run: |
+          missing=()
+          [ -z "$VPS_USER" ]      && missing+=(VPS_USER)
+          [ -z "$VPS_HOST" ]      && missing+=(VPS_HOST)
+          [ -z "$VPS_PATH" ]      && missing+=(VPS_PATH)
+          [ -z "$VPS_SSH_KEY" ]   && missing+=(VPS_SSH_KEY)
+          [ -z "$GHCR_USERNAME" ] && missing+=(GHCR_USERNAME)
+          [ -z "$GHCR_TOKEN" ]    && missing+=(GHCR_TOKEN)
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::Missing required repository secrets: ${missing[*]}"
+            exit 1
+          fi
+          case "$VPS_PATH" in
+            /*) : ;;
+            *) echo "::error::VPS_PATH must be an ABSOLUTE path (got '$VPS_PATH'). '~' does not expand in quoted CI strings."; exit 1 ;;
+          esac
+
+      - name: Configure SSH
+        env:
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_PORT: ${{ secrets.VPS_PORT }}
+        run: |
+          set -euo pipefail
+          PORT="${VPS_PORT:-22}"
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$VPS_SSH_KEY" | tr -d '\r' > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          if ! timeout 10 bash -c "exec 3<>/dev/tcp/${VPS_HOST}/${PORT}" 2>/dev/null; then
+            echo "::error::Cannot reach the VPS SSH port (${PORT})."
+            exit 1
+          fi
+          ssh-keyscan -p "$PORT" "$VPS_HOST" >> ~/.ssh/known_hosts
+
+      - name: Sync deploy artifacts and roll
+        env:
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_PORT: ${{ secrets.VPS_PORT }}
+          VPS_PATH: ${{ secrets.VPS_PATH }}
+          GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+        run: |
+          set -euo pipefail
+          SSH=(ssh -i ~/.ssh/id_deploy -o IdentitiesOnly=yes -p "${VPS_PORT:-22}" -o StrictHostKeyChecking=yes "$VPS_USER@$VPS_HOST")
+
+          if ! "${SSH[@]}" "mkdir -p '$VPS_PATH/web/server'" 2>/dev/null; then
+            echo "::error::The deploy user can't write to VPS_PATH."
+            exit 1
+          fi
+
+          STAGING=$(mktemp -d)
+          cp deploy/docker-compose.yml "$STAGING/docker-compose.yml"
+          cp deploy/rollout.sh "$STAGING/rollout.sh"
+          chmod +x "$STAGING/rollout.sh"
+          mkdir -p "$STAGING/web/server"
+          cp deploy/web/server/nginx.conf "$STAGING/web/server/nginx.conf"
+          tar -C "$STAGING" -cf - . | "${SSH[@]}" "tar -xf - -C '$VPS_PATH'"
+
+          "${SSH[@]}" bash -s -- server <<EOF
+          set -euo pipefail
+          cd "$VPS_PATH"
+          echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
+          export IMAGE_REPO="$IMAGE_REPO"
+          export IMAGE_TAG="$IMAGE_TAG"
+          export DEPLOY_DIR="$VPS_PATH"
+          chmod +x ./rollout.sh
+          ./rollout.sh "\$@"
+          EOF
