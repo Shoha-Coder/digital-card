@@ -1,0 +1,10 @@
+node_modules
+dist
+.env
+/generated
+schema.gql
+coverage
+.agents/
+.claude/
+.windsurf/
+skills-lock.json

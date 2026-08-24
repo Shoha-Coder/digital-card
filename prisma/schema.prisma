@@ -1,0 +1,84 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Profile {
+  id        String   @id @default(cuid())
+  slug      String   @unique
+  firstName String
+  lastName  String
+  title     String
+  bio       String?
+  email     String?
+  github    String?
+  linkedin  String?
+  telegram  String?
+  location  String?
+  avatarUrl String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  skills      Skill[]
+  experiences Experience[]
+  projects    Project[]
+  educations  Education[]
+}
+
+model Skill {
+  id        String @id @default(cuid())
+  name      String
+  category  String
+  level     Int
+  sortOrder Int    @default(0)
+  profileId String
+  profile   Profile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+
+  @@index([profileId])
+}
+
+model Experience {
+  id          String    @id @default(cuid())
+  company     String
+  role        String
+  startDate   DateTime
+  endDate     DateTime?
+  description String?
+  sortOrder   Int       @default(0)
+  profileId   String
+  profile     Profile   @relation(fields: [profileId], references: [id], onDelete: Cascade)
+
+  @@index([profileId])
+}
+
+model Project {
+  id          String   @id @default(cuid())
+  name        String
+  description String?
+  techStack   String[]
+  url         String?
+  repoUrl     String?
+  sortOrder   Int      @default(0)
+  profileId   String
+  profile     Profile  @relation(fields: [profileId], references: [id], onDelete: Cascade)
+
+  @@index([profileId])
+}
+
+model Education {
+  id          String @id @default(cuid())
+  institution String
+  degree      String
+  field       String?
+  startYear   Int
+  endYear     Int?
+  sortOrder   Int    @default(0)
+  profileId   String
+  profile     Profile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+
+  @@index([profileId])
+}
