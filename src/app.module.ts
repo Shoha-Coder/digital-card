@@ -5,6 +5,9 @@ import { join } from 'node:path';
 import { PrismaModule } from './prisma/prisma.module.js';
 import { ProfileModule } from './profile/profile.module.js';
 import { SkillModule } from './skill/skill.module.js';
+import { HealthModule } from './health/health.module.js';
+
+const isProd = process.env['NODE_ENV'] === 'production';
 
 @Module({
   imports: [
@@ -12,12 +15,13 @@ import { SkillModule } from './skill/skill.module.js';
       driver: ApolloDriver,
       autoSchemaFile: join(process.cwd(), 'schema.gql'),
       sortSchema: true,
-      playground: true,
-      introspection: true,
+      playground: !isProd,
+      introspection: !isProd,
     }),
     PrismaModule,
     ProfileModule,
     SkillModule,
+    HealthModule,
   ],
 })
 export class AppModule {}
