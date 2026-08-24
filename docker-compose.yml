@@ -6,14 +6,15 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: digital_card
-    ports:
-      - '5432:5432'
     volumes:
       - pgdata:/var/lib/postgresql/data
+    networks:
+      - internal
 
   app:
     build: .
     restart: unless-stopped
+    container_name: digital-card-app
     depends_on:
       - db
     environment:
@@ -21,6 +22,15 @@ services:
       PORT: '3000'
     ports:
       - '3000:3000'
+    networks:
+      - internal
+      - proxy
+
+networks:
+  internal:
+    driver: bridge
+  proxy:
+    external: true
 
 volumes:
   pgdata:
