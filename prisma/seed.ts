@@ -17,12 +17,12 @@ async function main() {
     data: {
       slug: 'shohruh',
       firstName: 'Shohruh',
-      lastName: 'Sobirov',
+      lastName: 'Asrorxonov',
       title: 'Full-Stack Engineer (TypeScript + Go)',
       bio: 'Full-stack engineer specializing in Next.js, NestJS, and Go. I build end-to-end: from frontend architecture (Feature-Sliced Design) to backend services and CI/CD pipelines deployed to VPS. Focused on shipping production systems with clean architecture, not just prototypes.',
-      email: 'arcsobirov@gmail.com',
+      email: 'shohacoder@gmail.com',
       github: 'https://github.com/shoha-coder',
-      telegram: 'https://t.me/shoha_coder',
+      telegram: 'https://t.me/sh0ha0',
       location: 'Tashkent, Uzbekistan',
       skills: {
         create: [
